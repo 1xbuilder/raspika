@@ -88,16 +88,26 @@ def fmt_day(lessons, date):
     day = [l for l in lessons if l["date"] == date]
     if not day:
         return head + "\n\nПар нет 🌤"
-    out = [head, ""]
+    out = [head]
     for l in sorted(day, key=lambda x: (x.get("num") or 0, x.get("start") or "")):
-        sg = f" · п/г {l['subgroup']}" if l.get("subgroup") else ""
-        t = f" ({l['type']})" if l.get("type") else ""
-        room = f" — <b>{l['room']}</b>" if l.get("room") else ""
-        line1 = f"{l.get('start','')}–{l.get('end','')}  <b>{l['subject']}</b>{t}{sg}"
-        line2 = f"      {l.get('teacher','')}{room}".rstrip()
-        out.append(line1)
-        if line2.strip():
-            out.append(line2)
+        out.append("")                                   # пустая строка между парами
+        pair = f"{l['num']} пара" if l.get("num") else "Пара"
+        time_ = f"{l.get('start','')}-{l.get('end','')}".strip("-")
+        out.append(f"<b>{pair}</b> · {time_}")
+        subj = l.get("subject") or "Занятие"
+        tags = []
+        if l.get("type"):
+            tags.append(l["type"])
+        if l.get("subgroup"):
+            tags.append(f"п/г {l['subgroup']}")
+        out.append(f"{subj}" + (f"  [{', '.join(tags)}]" if tags else ""))
+        info = []
+        if l.get("room"):
+            info.append(f"ауд. {l['room']}")
+        if l.get("teacher"):
+            info.append(l["teacher"])
+        if info:
+            out.append(" · ".join(info))
     return "\n".join(out)
 
 
