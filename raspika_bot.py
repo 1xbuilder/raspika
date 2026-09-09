@@ -26,12 +26,17 @@ TOKEN = (os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 CORE = os.environ.get("CORE_URL", "https://raspika.com").rstrip("/")
 # Мост с Claude: сообщения этого chat_id (кроме команд/кнопок) уходят в рабочую сессию
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
+BOT_KEY = os.environ.get("BOT_API_KEY", "")
 API = f"https://api.telegram.org/bot{TOKEN}"
 SITE = "raspika.com"
 
 KB = {"keyboard": [[{"text": "Сегодня"}, {"text": "Завтра"}],
-                   [{"text": "Неделя"}, {"text": "Профиль"}]],
+                   [{"text": "Неделя"}, {"text": "Профиль"}],
+                   [{"text": "Поддержка"}]],
       "resize_keyboard": True}
+
+# кто сейчас пишет обращение в поддержку: chat_id -> True
+_support_wait = {}
 
 RU_DAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 RU_MON = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -52,7 +57,8 @@ def send(chat, text, kb=KB):
 
 def core_get(path, **params):
     try:
-        r = httpx.get(f"{CORE}{path}", params=params, timeout=20)
+        r = httpx.get(f"{CORE}{path}", params=params, timeout=20,
+                      headers={"X-Bot-Key": BOT_KEY})
         return r.json() if r.status_code == 200 else None
     except Exception as e:
         print("core err:", e)
@@ -61,7 +67,8 @@ def core_get(path, **params):
 
 def core_post(path, payload):
     try:
-        r = httpx.post(f"{CORE}{path}", json=payload, timeout=20)
+        r = httpx.post(f"{CORE}{path}", json=payload, timeout=20,
+                       headers={"X-Bot-Key": BOT_KEY})
         return r.json() if r.status_code == 200 else None
     except Exception as e:
         print("core err:", e)
@@ -86,12 +93,19 @@ def _decode_sub(arg):
 
 # ---------------- расписание ----------------
 
-def fmt_day(lessons, date):
+def fmt_day(lessons, date, hw=None):
     d = datetime.date.fromisoformat(date)
     head = f"📅 <b>{RU_DAYS[d.weekday()]}, {d.day} {RU_MON[d.month]}</b>"
     day = [l for l in lessons if l["date"] == date]
     if not day:
         return head + "\n\nПар нет 🌤"
+    hw = hw or []
+
+    def hw_lines(subj):
+        s = (subj or "").lower().strip()
+        return [h for h in hw
+                if h["date"] == date and (h.get("subject") or "").lower().strip() == s]
+
     out = [head]
     for l in sorted(day, key=lambda x: (x.get("num") or 0, x.get("start") or "")):
         out.append("")                                   # пустая строка между парами
@@ -112,6 +126,10 @@ def fmt_day(lessons, date):
             info.append(l["teacher"])
         if info:
             out.append(" · ".join(info))
+        for h in hw_lines(l.get("subject")):
+            out.append(f"📚 ДЗ: {h['text']}")
+            for f in h.get("files") or []:
+                out.append(f"📎 https://raspika.com{f['url']}")
     return "\n".join(out)
 
 
@@ -126,21 +144,27 @@ def show_schedule(chat, mode):
         send(chat, "Не получилось получить расписание, попробуй позже.")
         return
     lessons = sched.get("data", [])
+    sg = prof.get("subgroup") or 0
+    if sg:  # своя подгруппа: чужие пары скрываем, общие оставляем
+        lessons = [l for l in lessons if not l.get("subgroup") or l.get("subgroup") == sg]
     stale = " \n\n⚠️ Сайт вуза недоступен, показана последняя копия." if sched.get("stale") else ""
+    hw = (core_get("/api/homework", inst=prof["inst"], group=prof["group"]) or {}).get("data", [])
     today = datetime.date.today()
     gname = prof.get("group_name") or prof.get("group")
-    if mode == "today":
-        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, today.isoformat()) + stale)
+    if isinstance(mode, str) and mode.startswith("date:"):
+        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, mode[5:], hw) + stale)
+    elif mode == "today":
+        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, today.isoformat(), hw) + stale)
     elif mode == "tomorrow":
         d = today + datetime.timedelta(days=1)
-        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, d.isoformat()) + stale)
+        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, d.isoformat(), hw) + stale)
     else:  # week: каждый день отдельным сообщением, чтобы не было каши
         monday = today - datetime.timedelta(days=today.weekday())
         sent = 0
         for i in range(6):
             d = monday + datetime.timedelta(days=i)
             if [l for l in lessons if l["date"] == d.isoformat()]:
-                send(chat, fmt_day(lessons, d.isoformat()))
+                send(chat, fmt_day(lessons, d.isoformat(), hw))
                 sent += 1
                 time.sleep(0.3)
         if not sent:
@@ -167,6 +191,33 @@ def show_profile(chat):
 def handle(msg):
     chat = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
+
+    # Ответ владельца на тикет: реплай на сообщение «💬 #xxxx ...»
+    rt = msg.get("reply_to_message")
+    if rt and text:
+        import re as _re
+        m = _re.search(r"#([0-9a-f]{4})", rt.get("text") or "")
+        if m:
+            r = core_post("/api/support/reply",
+                          {"ticket": m.group(1), "text": text, "admin_chat_id": str(chat)})
+            if r and r.get("ok"):
+                send(chat, f"✅ Ответ доставлен ({r.get('delivered_to')})")
+            else:
+                send(chat, "Не получилось доставить ответ (тикет не найден или нет прав).")
+            return
+
+    # Пользователь пишет обращение в поддержку
+    if _support_wait.pop(chat, None) and not text.startswith("/"):
+        r = core_post("/api/support/send",
+                      {"uid": f"tg:{chat}", "channel": "tg", "text": text,
+                       "contact": "@" + (msg.get("from", {}).get("username") or str(chat))})
+        send(chat, "Отправлено! Ответ придёт сюда же." if r else "Ошибка, попробуй позже.")
+        return
+
+    if text.lower() == "поддержка":
+        _support_wait[chat] = True
+        send(chat, "Напиши свою проблему или идею одним сообщением:")
+        return
 
     if text.startswith("/start"):
         parts = text.split(maxsplit=1)
@@ -221,7 +272,8 @@ def handle(msg):
         if payload:
             try:
                 r = httpx.post(f"{CORE}/api/bridge/in",
-                               json={"chat_id": str(chat), "text": payload}, timeout=15)
+                               json={"chat_id": str(chat), "text": payload}, timeout=15,
+                               headers={"X-Bot-Key": BOT_KEY})
                 if r.status_code == 200:
                     send(chat, "📨 Передал Claude.")
                 elif r.status_code != 403:
@@ -232,7 +284,18 @@ def handle(msg):
         elif ADMIN_CHAT_ID and str(chat) == ADMIN_CHAT_ID:
             send(chat, "Напиши так: /claude твой текст")
     else:
-        send(chat, "Кнопки ниже: Сегодня · Завтра · Неделя · Профиль")
+        m2 = __import__("re").match(r"^(\d{1,2})[./](\d{1,2})$", text)
+        if m2:
+            import datetime as _dt
+            dd, mm = int(m2.group(1)), int(m2.group(2))
+            try:
+                d = _dt.date(_dt.date.today().year, mm, dd)
+                show_schedule(chat, "date:" + d.isoformat())
+            except ValueError:
+                send(chat, "Не понял дату. Пример: 15.09")
+            return
+        send(chat, "Кнопки ниже: Сегодня · Завтра · Неделя · Профиль\n"
+                   "Или напиши дату, например 15.09")
 
 
 def main():
