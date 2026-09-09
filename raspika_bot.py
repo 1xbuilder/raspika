@@ -45,6 +45,24 @@ def _find_bot_key():
 
 
 BOT_KEY = _find_bot_key()
+
+
+def _fetch_bot_key():
+    """bothost не пробрасывает свои переменные до контейнера, поэтому ключ
+    выдает ядро в обмен на токен бота (его знают только ядро и хостинг)."""
+    global BOT_KEY
+    if BOT_KEY.startswith("bk_"):
+        return True
+    try:
+        r = httpx.post(f"{CORE}/api/bot/key", json={"token": TOKEN}, timeout=15)
+        if r.status_code == 200:
+            k = (r.json().get("key") or "").strip()
+            if k.startswith("bk_"):
+                BOT_KEY = k
+                return True
+    except Exception as e:
+        print("key fetch err:", e)
+    return False
 API = f"https://api.telegram.org/bot{TOKEN}"
 SITE = "raspika.com"
 
@@ -77,6 +95,8 @@ def send(chat, text, kb=KB):
 
 
 def core_get(path, **params):
+    if not BOT_KEY.startswith("bk_"):
+        _fetch_bot_key()
     try:
         r = httpx.get(f"{CORE}{path}", params=params, timeout=20,
                       headers={"X-Bot-Key": BOT_KEY})
@@ -87,6 +107,8 @@ def core_get(path, **params):
 
 
 def core_post(path, payload):
+    if not BOT_KEY.startswith("bk_"):
+        _fetch_bot_key()
     try:
         r = httpx.post(f"{CORE}{path}", json=payload, timeout=20,
                        headers={"X-Bot-Key": BOT_KEY})
@@ -383,6 +405,10 @@ def main():
         httpx.get(f"{API}/deleteWebhook", timeout=10)
     except Exception:
         pass
+    for _ in range(3):
+        if _fetch_bot_key():
+            break
+        time.sleep(2)
     print("raspika_bot запущен (long-polling), bot-key:",
           "ok" if BOT_KEY.startswith("bk_") else "НЕ НАЙДЕН")
     offset = None
