@@ -214,15 +214,21 @@ def handle(msg):
     elif text.lower() == "профиль":
         show_profile(chat)
     elif text.startswith("/claude"):
-        # мост с рабочей сессией Claude: только для владельца
-        if ADMIN_CHAT_ID and str(chat) == ADMIN_CHAT_ID:
-            payload = text[len("/claude"):].strip()
-            if not payload:
-                send(chat, "Напиши так: /claude твой текст")
-            else:
-                r = core_post("/api/bridge/in", {"chat_id": str(chat), "text": payload})
-                send(chat, "📨 Передал Claude." if r else "Мост недоступен, попробуй позже.")
-        # чужим не отвечаем ничего про мост
+        # мост с рабочей сессией Claude: владельца проверяет ядро (403 чужим)
+        payload = text[len("/claude"):].strip()
+        if payload:
+            try:
+                r = httpx.post(f"{CORE}/api/bridge/in",
+                               json={"chat_id": str(chat), "text": payload}, timeout=15)
+                if r.status_code == 200:
+                    send(chat, "📨 Передал Claude.")
+                elif r.status_code != 403:
+                    send(chat, "Мост недоступен, попробуй позже.")
+                # 403 (не владелец): молчим
+            except Exception:
+                send(chat, "Мост недоступен, попробуй позже.")
+        elif ADMIN_CHAT_ID and str(chat) == ADMIN_CHAT_ID:
+            send(chat, "Напиши так: /claude твой текст")
     else:
         send(chat, "Кнопки ниже: Сегодня · Завтра · Неделя · Профиль")
 
