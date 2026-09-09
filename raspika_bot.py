@@ -20,7 +20,9 @@ import time
 
 import httpx
 
-TOKEN = os.environ.get("BOT_TOKEN", "")
+# Токен: bothost кладёт его в системные переменные под разными именами
+TOKEN = (os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+         or os.environ.get("API_TOKEN") or os.environ.get("TOKEN") or "")
 CORE = os.environ.get("CORE_URL", "https://raspika.com").rstrip("/")
 # Мост с Claude: сообщения этого chat_id (кроме команд/кнопок) уходят в рабочую сессию
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
@@ -235,8 +237,12 @@ def handle(msg):
 
 def main():
     if not TOKEN:
-        print("BOT_TOKEN не задан — бот не запущен.")
+        print("BOT_TOKEN не задан, бот не запущен.")
         return
+    try:  # если платформа включила webhook, long-polling получит 409: снимаем
+        httpx.get(f"{API}/deleteWebhook", timeout=10)
+    except Exception:
+        pass
     print("raspika_bot запущен (long-polling)")
     offset = None
     while True:
