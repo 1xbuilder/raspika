@@ -22,6 +22,8 @@ import httpx
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
 CORE = os.environ.get("CORE_URL", "https://raspika.com").rstrip("/")
+# Мост с Claude: сообщения этого chat_id (кроме команд/кнопок) уходят в рабочую сессию
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
 API = f"https://api.telegram.org/bot{TOKEN}"
 SITE = "raspika.com"
 
@@ -93,17 +95,17 @@ def fmt_day(lessons, date):
         out.append("")                                   # пустая строка между парами
         pair = f"{l['num']} пара" if l.get("num") else "Пара"
         time_ = f"{l.get('start','')}-{l.get('end','')}".strip("-")
-        out.append(f"<b>{pair}</b> · {time_}")
+        out.append(f"🔹 <b>{pair}</b> · {time_}")
         subj = l.get("subject") or "Занятие"
         tags = []
         if l.get("type"):
             tags.append(l["type"])
         if l.get("subgroup"):
             tags.append(f"п/г {l['subgroup']}")
-        out.append(f"{subj}" + (f"  [{', '.join(tags)}]" if tags else ""))
+        out.append(subj + (f" · <i>{', '.join(tags)}</i>" if tags else ""))
         info = []
         if l.get("room"):
-            info.append(f"ауд. {l['room']}")
+            info.append(f"📍 {l['room']}")
         if l.get("teacher"):
             info.append(l["teacher"])
         if info:
@@ -130,18 +132,19 @@ def show_schedule(chat, mode):
     elif mode == "tomorrow":
         d = today + datetime.timedelta(days=1)
         send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, d.isoformat()) + stale)
-    else:  # week
+    else:  # week: каждый день отдельным сообщением, чтобы не было каши
         monday = today - datetime.timedelta(days=today.weekday())
-        parts = [f"<b>{gname}</b> — неделя"]
+        sent = 0
         for i in range(6):
             d = monday + datetime.timedelta(days=i)
-            day = [l for l in lessons if l["date"] == d.isoformat()]
-            if day:
-                parts.append("")
-                parts.append(fmt_day(lessons, d.isoformat()))
-        if len(parts) == 1:
-            parts.append("\nНа этой неделе пар нет 🌤")
-        send(chat, "\n".join(parts) + stale)
+            if [l for l in lessons if l["date"] == d.isoformat()]:
+                send(chat, fmt_day(lessons, d.isoformat()))
+                sent += 1
+                time.sleep(0.3)
+        if not sent:
+            send(chat, f"<b>{gname}</b>\nНа этой неделе пар нет 🌤" + stale)
+        elif stale:
+            send(chat, stale.strip())
 
 
 def show_profile(chat):
@@ -210,6 +213,16 @@ def handle(msg):
         show_schedule(chat, "week")
     elif text.lower() == "профиль":
         show_profile(chat)
+    elif text.startswith("/claude"):
+        # мост с рабочей сессией Claude: только для владельца
+        if ADMIN_CHAT_ID and str(chat) == ADMIN_CHAT_ID:
+            payload = text[len("/claude"):].strip()
+            if not payload:
+                send(chat, "Напиши так: /claude твой текст")
+            else:
+                r = core_post("/api/bridge/in", {"chat_id": str(chat), "text": payload})
+                send(chat, "📨 Передал Claude." if r else "Мост недоступен, попробуй позже.")
+        # чужим не отвечаем ничего про мост
     else:
         send(chat, "Кнопки ниже: Сегодня · Завтра · Неделя · Профиль")
 
