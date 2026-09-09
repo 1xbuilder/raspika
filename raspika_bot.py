@@ -26,7 +26,25 @@ TOKEN = (os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 CORE = os.environ.get("CORE_URL", "https://raspika.com").rstrip("/")
 # Мост с Claude: сообщения этого chat_id (кроме команд/кнопок) уходят в рабочую сессию
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
-BOT_KEY = os.environ.get("BOT_API_KEY", "")
+# Ключ ботов: bothost может не пробрасывать имя BOT_API_KEY, поэтому
+# дополнительно ищем значение с префиксом bk_ в любой переменной
+# и срезаем случайно вставленное "BOT_API_KEY=" из самого значения.
+def _find_bot_key():
+    v = (os.environ.get("BOT_API_KEY") or "").strip().strip('"').strip("'")
+    if v.startswith("BOT_API_KEY="):
+        v = v.split("=", 1)[1].strip()
+    if v.startswith("bk_"):
+        return v
+    for val in os.environ.values():
+        s = (val or "").strip().strip('"').strip("'")
+        if s.startswith("BOT_API_KEY="):
+            s = s.split("=", 1)[1].strip()
+        if s.startswith("bk_"):
+            return s
+    return v
+
+
+BOT_KEY = _find_bot_key()
 API = f"https://api.telegram.org/bot{TOKEN}"
 SITE = "raspika.com"
 
@@ -37,6 +55,9 @@ KB = {"keyboard": [[{"text": "Сегодня"}, {"text": "Завтра"}],
 
 # кто сейчас пишет обращение в поддержку: chat_id -> True
 _support_wait = {}
+
+# слова-кнопки главного меню: в режиме поддержки они выводят из него, а не уходят тикетом
+MENU_WORDS = {"сегодня", "завтра", "неделя", "профиль", "поддержка"}
 
 RU_DAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 RU_MON = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -78,6 +99,38 @@ def core_post(path, payload):
 def get_profile(chat):
     d = core_get("/api/profile", chat_id=str(chat))
     return d.get("data") if d else None
+
+
+def _extract_file(msg):
+    """(file_id, имя) из фото или документа; ("big", None) если больше 8 МБ."""
+    if msg.get("photo"):
+        p = msg["photo"][-1]                      # самое большое превью
+        if (p.get("file_size") or 0) > 8 * 1024 * 1024:
+            return "big", None
+        return p["file_id"], "photo.jpg"
+    doc = msg.get("document")
+    if doc:
+        if (doc.get("file_size") or 0) > 8 * 1024 * 1024:
+            return "big", None
+        return doc["file_id"], doc.get("file_name") or "file.bin"
+    return None, None
+
+
+def _support_file(chat, file_id, fname, caption, contact):
+    """Скачать файл у Telegram и передать в поддержку ядра."""
+    try:
+        r = httpx.get(f"{API}/getFile", params={"file_id": file_id}, timeout=20)
+        path = r.json()["result"]["file_path"]
+        data = httpx.get(f"https://api.telegram.org/file/bot{TOKEN}/{path}", timeout=60).content
+        up = httpx.post(f"{CORE}/api/support/upload",
+                        params={"uid": f"tg:{chat}", "channel": "tg",
+                                "contact": contact, "caption": caption or ""},
+                        files={"file": (fname, data)},
+                        headers={"X-Bot-Key": BOT_KEY}, timeout=60)
+        return up.status_code == 200
+    except Exception as e:
+        print("support file err:", e)
+        return False
 
 
 def _decode_sub(arg):
@@ -190,7 +243,7 @@ def show_profile(chat):
 
 def handle(msg):
     chat = msg["chat"]["id"]
-    text = (msg.get("text") or "").strip()
+    text = (msg.get("text") or msg.get("caption") or "").strip()
 
     # Ответ владельца на тикет: реплай на сообщение «💬 #xxxx ...»
     rt = msg.get("reply_to_message")
@@ -207,16 +260,37 @@ def handle(msg):
             return
 
     # Пользователь пишет обращение в поддержку
-    if _support_wait.pop(chat, None) and not text.startswith("/"):
-        r = core_post("/api/support/send",
-                      {"uid": f"tg:{chat}", "channel": "tg", "text": text,
-                       "contact": "@" + (msg.get("from", {}).get("username") or str(chat))})
-        send(chat, "Отправлено! Ответ придёт сюда же." if r else "Ошибка, попробуй позже.")
-        return
+    if chat in _support_wait:
+        low = text.lower()
+        if low == "отмена":
+            _support_wait.pop(chat, None)
+            send(chat, "Ок, отменил. Кнопки ниже.")
+            return
+        if text.startswith("/") or low in MENU_WORDS:
+            _support_wait.pop(chat, None)   # кнопка меню или команда: выходим из поддержки
+        else:
+            _support_wait.pop(chat, None)
+            contact = "@" + (msg.get("from", {}).get("username") or str(chat))
+            fid, fname = _extract_file(msg)
+            if fid == "big":
+                send(chat, "Файл больше 8 МБ, пришли поменьше.")
+            elif fid:
+                ok = _support_file(chat, fid, fname, text, contact)
+                send(chat, "Отправлено! Ответ придёт сюда же." if ok
+                     else "Не получилось отправить файл, попробуй ещё раз.")
+            elif text:
+                r = core_post("/api/support/send",
+                              {"uid": f"tg:{chat}", "channel": "tg", "text": text,
+                               "contact": contact})
+                send(chat, "Отправлено! Ответ придёт сюда же." if r else "Ошибка, попробуй позже.")
+            else:
+                send(chat, "Пришли текст, фото или файл одним сообщением. Отменить: любая кнопка.")
+            return
 
     if text.lower() == "поддержка":
         _support_wait[chat] = True
-        send(chat, "Напиши свою проблему или идею одним сообщением:")
+        send(chat, "Напиши свою проблему или идею одним сообщением. Можно приложить фото или файл.\n"
+                   "Передумал: нажми любую кнопку или напиши Отмена.")
         return
 
     if text.startswith("/start"):
@@ -294,6 +368,9 @@ def handle(msg):
             except ValueError:
                 send(chat, "Не понял дату. Пример: 15.09")
             return
+        if not text and (msg.get("photo") or msg.get("document")):
+            send(chat, "Чтобы отправить фото или файл в поддержку, сначала нажми «Поддержка».")
+            return
         send(chat, "Кнопки ниже: Сегодня · Завтра · Неделя · Профиль\n"
                    "Или напиши дату, например 15.09")
 
@@ -306,7 +383,8 @@ def main():
         httpx.get(f"{API}/deleteWebhook", timeout=10)
     except Exception:
         pass
-    print("raspika_bot запущен (long-polling)")
+    print("raspika_bot запущен (long-polling), bot-key:",
+          "ok" if BOT_KEY.startswith("bk_") else "НЕ НАЙДЕН")
     offset = None
     while True:
         try:
