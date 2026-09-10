@@ -220,7 +220,7 @@ def handle_callback(cb):
             send(chat, "Не получилось сохранить, попробуй позже.")
             return
         core_post("/api/profile", {"chat_id": str(chat), "group_name": g.get("name") or ""})
-        send(chat, f"Готово! Твоя группа: <b>{g.get('name')}</b> 🔔\n"
+        send(chat, f"Готово! Твоя группа: <b>{g.get('name')}</b>\n"
                    f"Запомнил. Кнопки ниже: расписание прямо здесь.\n"
                    f"Уведомления об изменениях уже включены.")
         show_schedule(chat, "today")
@@ -261,7 +261,7 @@ def fmt_day(lessons, date, hw=None):
     head = f"📅 <b>{RU_DAYS[d.weekday()]}, {d.day} {RU_MON[d.month]}</b>"
     day = [l for l in lessons if l["date"] == date]
     if not day:
-        return head + "\n\nПар нет 🌤"
+        return head + "\n\nПар нет"
     hw = hw or []
 
     def hw_lines(subj):
@@ -310,8 +310,9 @@ def show_schedule(chat, mode):
     sg = prof.get("subgroup") or 0
     if sg:  # своя подгруппа: чужие пары скрываем, общие оставляем
         lessons = [l for l in lessons if not l.get("subgroup") or l.get("subgroup") == sg]
-    stale = " \n\n⚠️ Сайт вуза недоступен, показана последняя копия." if sched.get("stale") else ""
-    hw = (core_get("/api/homework", inst=prof["inst"], group=prof["group"]) or {}).get("data", [])
+    stale = " \n\nСайт вуза недоступен, показана последняя копия." if sched.get("stale") else ""
+    hw = (core_get("/api/homework", inst=prof["inst"], group=prof["group"],
+                   chat_id=str(chat)) or {}).get("data", [])
     today = datetime.date.today()
     gname = prof.get("group_name") or prof.get("group")
     def day_nav(d):
@@ -348,7 +349,7 @@ def show_schedule(chat, mode):
                 sent += 1
                 time.sleep(0.3)
         if not sent:
-            send(chat, f"<b>{gname}</b>\nНа этой неделе пар нет 🌤" + stale)
+            send(chat, f"<b>{gname}</b>\nНа этой неделе пар нет" + stale)
         elif stale:
             send(chat, stale.strip())
 
@@ -358,13 +359,13 @@ def show_profile(chat):
     if not prof:
         send(chat, f"Профиль не найден. Открой {SITE} и нажми «Привязать Telegram».")
         return
-    notify = "включены 🔔" if prof.get("notify") else "выключены 🔕"
+    notify = "включены" if prof.get("notify") else "выключены"
     sync = ""
     if prof.get("token"):
         sync = (f"\n\nОткрыть свой профиль на компе или в другом браузере:\n"
                 f"https://{SITE}/?t={prof['token']}\n"
                 f"(ссылка личная, не пересылай её)")
-    send(chat, f"👤 <b>Профиль</b>\n"
+    send(chat, f"<b>Профиль</b>\n"
                f"Группа: <b>{prof.get('group_name') or prof.get('group')}</b>\n"
                f"Уведомления об изменениях: {notify}\n\n"
                f"Сменить группу: на сайте {SITE} (изменится и здесь).\n"
@@ -377,7 +378,7 @@ def handle(msg):
     chat = msg["chat"]["id"]
     text = (msg.get("text") or msg.get("caption") or "").strip()
 
-    # Ответ владельца на тикет: реплай на сообщение «💬 #xxxx ...»
+    # Ответ владельца на тикет: реплай на сообщение «#xxxx ...»
     rt = msg.get("reply_to_message")
     if rt and text:
         import re as _re
@@ -386,7 +387,7 @@ def handle(msg):
             r = core_post("/api/support/reply",
                           {"ticket": m.group(1), "text": text, "admin_chat_id": str(chat)})
             if r and r.get("ok"):
-                send(chat, f"✅ Ответ доставлен ({r.get('delivered_to')})")
+                send(chat, f"Ответ доставлен ({r.get('delivered_to')})")
             else:
                 send(chat, "Не получилось доставить ответ (тикет не найден или нет прав).")
             return
@@ -441,10 +442,10 @@ def handle(msg):
             r = core_post("/api/link/complete", {"code": code, "chat_id": str(chat)})
             if r and r.get("ok"):
                 p = r["profile"]
-                send(chat, f"🔗 Готово! Профиль привязан.\n"
+                send(chat, f"Готово! Профиль привязан.\n"
                            f"Группа: <b>{p.get('group_name') or p.get('group')}</b>\n"
-                           f"Уведомления об изменениях включены 🔔\n\n"
-                           f"Кнопки ниже — расписание прямо здесь.")
+                           f"Уведомления об изменениях включены\n\n"
+                           f"Кнопки ниже: расписание прямо здесь.")
             else:
                 send(chat, "Код привязки не найден или истёк. Открой сайт и нажми "
                            "«Привязать Telegram» ещё раз.")
@@ -453,22 +454,22 @@ def handle(msg):
             if parsed:
                 inst, group = parsed
                 r = core_post("/api/subscribe", {"chat_id": str(chat), "inst": inst, "group": group})
-                send(chat, "🔔 Подписка оформлена!" if r else "Ошибка, попробуй позже.")
+                send(chat, "Подписка оформлена!" if r else "Ошибка, попробуй позже.")
             else:
                 send(chat, "Не понял ссылку. Открой сайт и попробуй ещё раз.")
         else:
             prof = get_profile(chat)
             if prof:
                 send(chat, f"Привет! Твоя группа: <b>{prof.get('group_name') or prof.get('group')}</b>.\n"
-                           f"Кнопки ниже — расписание.")
+                           f"Кнопки ниже: расписание.")
             else:
                 start_onboarding(chat)
     elif text == "/stop":
         core_post("/api/profile", {"chat_id": str(chat), "notify": False})
-        send(chat, "🔕 Уведомления выключены. Включить: /notify")
+        send(chat, "Уведомления выключены. Включить: /notify")
     elif text == "/notify":
         core_post("/api/profile", {"chat_id": str(chat), "notify": True})
-        send(chat, "🔔 Уведомления включены.")
+        send(chat, "Уведомления включены.")
     elif text.lower() == "сегодня":
         show_schedule(chat, "today")
     elif text.lower() == "завтра":
@@ -486,7 +487,7 @@ def handle(msg):
                                json={"chat_id": str(chat), "text": payload}, timeout=15,
                                headers={"X-Bot-Key": BOT_KEY})
                 if r.status_code == 200:
-                    send(chat, "📨 Передал Claude.")
+                    send(chat, "Передал Claude.")
                 elif r.status_code != 403:
                     send(chat, "Мост недоступен, попробуй позже.")
                 # 403 (не владелец): молчим
