@@ -74,6 +74,9 @@ KB = {"keyboard": [[{"text": "Сегодня"}, {"text": "Завтра"}],
 # кто сейчас пишет обращение в поддержку: chat_id -> True
 _support_wait = {}
 
+# онбординг новичка: chat_id -> {"inst": key, "cands": [группы-кандидаты]}
+_pick = {}
+
 # слова-кнопки главного меню: в режиме поддержки они выводят из него, а не уходят тикетом
 MENU_WORDS = {"сегодня", "завтра", "неделя", "профиль", "поддержка"}
 
@@ -155,6 +158,91 @@ def _support_file(chat, file_id, fname, caption, contact):
         return False
 
 
+def start_onboarding(chat):
+    """Первый вход: выбор вуза инлайн-кнопками, потом поиск группы по названию."""
+    insts = (core_get("/api/institutions") or {}).get("data") or []
+    live = [i for i in insts if i.get("live", True) and i.get("key")]
+    if not live:
+        send(chat, f"Привет! Это <b>Raspika</b>. Открой {SITE}, выбери вуз и группу.")
+        return
+    rows, row = [], []
+    for i in live:
+        row.append({"text": i.get("short") or i.get("name"), "callback_data": f"i:{i['key']}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    send(chat, "Привет! Это <b>Raspika</b>, расписание вузов Омска.\n\n"
+               "Выбери свой вуз (один раз, дальше запомню):",
+         kb={"inline_keyboard": rows})
+
+
+def handle_callback(cb):
+    chat = cb["message"]["chat"]["id"]
+    data = cb.get("data") or ""
+    try:  # убрать «часики» на кнопке
+        httpx.post(f"{API}/answerCallbackQuery",
+                   json={"callback_query_id": cb["id"]}, timeout=10)
+    except Exception:
+        pass
+    if data.startswith("d:"):        # листание дней под расписанием
+        show_schedule(chat, "date:" + data[2:])
+        return
+    if data == "w:":
+        show_schedule(chat, "week")
+        return
+    if data.startswith("s:"):        # цикл подгруппы: все -> 1 -> 2 -> все
+        prof = get_profile(chat)
+        if prof:
+            cur = prof.get("subgroup") or 0
+            new = (cur + 1) % 3
+            core_post("/api/profile", {"chat_id": str(chat), "subgroup": new})
+            send(chat, f"Подгруппа: <b>{new or 'все'}</b>")
+            show_schedule(chat, "date:" + data[2:])
+        return
+    if data.startswith("i:"):
+        _pick[chat] = {"inst": data[2:]}
+        send(chat, "Теперь напиши название своей группы, например <b>ИСТ-253</b> "
+                   "или её часть:")
+    elif data.startswith("g:"):
+        st = _pick.get(chat) or {}
+        cands = st.get("cands") or []
+        try:
+            g = cands[int(data[2:])]
+        except (ValueError, IndexError):
+            send(chat, "Не нашёл эту группу, напиши название ещё раз.")
+            return
+        _pick.pop(chat, None)
+        r = core_post("/api/subscribe", {"chat_id": str(chat), "inst": st["inst"],
+                                         "group": str(g["id"])})
+        if not r:
+            send(chat, "Не получилось сохранить, попробуй позже.")
+            return
+        core_post("/api/profile", {"chat_id": str(chat), "group_name": g.get("name") or ""})
+        send(chat, f"Готово! Твоя группа: <b>{g.get('name')}</b> 🔔\n"
+                   f"Запомнил. Кнопки ниже: расписание прямо здесь.\n"
+                   f"Уведомления об изменениях уже включены.")
+        show_schedule(chat, "today")
+
+
+def handle_pick_text(chat, text):
+    """Юзер в онбординге написал название группы: ищем и предлагаем кнопками."""
+    st = _pick.get(chat)
+    q = text.lower().replace(" ", "")
+    groups = (core_get("/api/groups", inst=st["inst"]) or {}).get("data") or []
+    found = [g for g in groups if q in str(g.get("name", "")).lower().replace(" ", "")]
+    if not found:
+        send(chat, "Не нашёл такую группу. Проверь название и напиши ещё раз "
+                   "(можно только часть, например 251).")
+        return
+    found = found[:8]
+    st["cands"] = found
+    rows = [[{"text": g["name"][:60], "callback_data": f"g:{i}"}] for i, g in enumerate(found)]
+    send(chat, "Нашёл! Выбери свою группу:" if len(found) > 1 else "Твоя группа:",
+         kb={"inline_keyboard": rows})
+
+
 def _decode_sub(arg):
     raw = arg[4:]
     raw += "=" * (-len(raw) % 4)
@@ -226,13 +314,30 @@ def show_schedule(chat, mode):
     hw = (core_get("/api/homework", inst=prof["inst"], group=prof["group"]) or {}).get("data", [])
     today = datetime.date.today()
     gname = prof.get("group_name") or prof.get("group")
+    def day_nav(d):
+        """Инлайн-кнопки листания под расписанием дня."""
+        prev = (d - datetime.timedelta(days=1)).isoformat()
+        nxt = (d + datetime.timedelta(days=1)).isoformat()
+        sg_txt = f"Подгруппа: {sg or 'все'}"
+        return {"inline_keyboard": [
+            [{"text": "◀", "callback_data": f"d:{prev}"},
+             {"text": "Сегодня", "callback_data": f"d:{today.isoformat()}"},
+             {"text": "▶", "callback_data": f"d:{nxt}"}],
+            [{"text": "Неделя", "callback_data": "w:"},
+             {"text": sg_txt, "callback_data": f"s:{d.isoformat()}"}],
+        ]}
+
     if isinstance(mode, str) and mode.startswith("date:"):
-        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, mode[5:], hw) + stale)
+        d = datetime.date.fromisoformat(mode[5:])
+        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, d.isoformat(), hw) + stale,
+             kb=day_nav(d))
     elif mode == "today":
-        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, today.isoformat(), hw) + stale)
+        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, today.isoformat(), hw) + stale,
+             kb=day_nav(today))
     elif mode == "tomorrow":
         d = today + datetime.timedelta(days=1)
-        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, d.isoformat(), hw) + stale)
+        send(chat, f"<b>{gname}</b>\n" + fmt_day(lessons, d.isoformat(), hw) + stale,
+             kb=day_nav(d))
     else:  # week: каждый день отдельным сообщением, чтобы не было каши
         monday = today - datetime.timedelta(days=today.weekday())
         sent = 0
@@ -314,6 +419,14 @@ def handle(msg):
                 send(chat, "Пришли текст, фото или файл одним сообщением. Отменить: любая кнопка.")
             return
 
+    # онбординг: ждём название группы
+    if chat in _pick:
+        if text.startswith("/") or text.lower() in MENU_WORDS:
+            _pick.pop(chat, None)      # вышел кнопкой или командой
+        elif text:
+            handle_pick_text(chat, text)
+            return
+
     if text.lower() == "поддержка":
         _support_wait[chat] = True
         send(chat, "Напиши свою проблему или идею одним сообщением. Можно приложить фото или файл.\n"
@@ -349,10 +462,7 @@ def handle(msg):
                 send(chat, f"Привет! Твоя группа: <b>{prof.get('group_name') or prof.get('group')}</b>.\n"
                            f"Кнопки ниже — расписание.")
             else:
-                send(chat, f"Привет! Это <b>Raspika</b> — расписание вузов Омска.\n\n"
-                           f"1. Открой {SITE}\n2. Выбери вуз и группу\n"
-                           f"3. Нажми «Привязать Telegram»\n\n"
-                           f"После этого здесь появится твоё расписание и уведомления об изменениях.")
+                start_onboarding(chat)
     elif text == "/stop":
         core_post("/api/profile", {"chat_id": str(chat), "notify": False})
         send(chat, "🔕 Уведомления выключены. Включить: /notify")
@@ -424,6 +534,8 @@ def main():
                 offset = upd["update_id"] + 1
                 if upd.get("message"):
                     handle(upd["message"])
+                elif upd.get("callback_query"):
+                    handle_callback(upd["callback_query"])
         except Exception as e:
             print("poll err:", e)
             time.sleep(3)
