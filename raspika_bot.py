@@ -254,11 +254,16 @@ def show_profile(chat):
         send(chat, f"Профиль не найден. Открой {SITE} и нажми «Привязать Telegram».")
         return
     notify = "включены 🔔" if prof.get("notify") else "выключены 🔕"
+    sync = ""
+    if prof.get("token"):
+        sync = (f"\n\nОткрыть свой профиль на компе или в другом браузере:\n"
+                f"https://{SITE}/?t={prof['token']}\n"
+                f"(ссылка личная, не пересылай её)")
     send(chat, f"👤 <b>Профиль</b>\n"
                f"Группа: <b>{prof.get('group_name') or prof.get('group')}</b>\n"
                f"Уведомления об изменениях: {notify}\n\n"
                f"Сменить группу: на сайте {SITE} (изменится и здесь).\n"
-               f"Уведомления: /stop — выключить, /notify — включить.")
+               f"Уведомления: /stop выключить, /notify включить." + sync)
 
 
 # ---------------- handlers ----------------
